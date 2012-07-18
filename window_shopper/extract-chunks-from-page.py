@@ -38,7 +38,7 @@ def extract_para(node, f):
 
 
 try:
-    soup = BeautifulSoup(open(sys.argv[1]))
+    soup = BeautifulSoup(open(sys.argv[1]),'html5lib')
     output_title = codecs.open(sys.argv[3], encoding='utf-8', mode='w')
     head = soup.find('head')
     if head:
