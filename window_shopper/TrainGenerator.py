@@ -14,6 +14,29 @@ from multiprocessing import Pool;
 
 stemmer = EnglishStemmer();
 
+class TextChain:
+    def __init__(self, workers):
+        self.workers = workers;
+
+    def work(self, text_piece):
+        for worker in self.workers:
+            worker.work(text_piece);
+
+class TextStemmer:
+    def __init__(self, tokenize_func, stemmer):
+        self.tokenize_func = tokenize_func;
+        self.stemmer = stemmer;
+
+    def work(self, text_piece):
+        text_piece.tokens = map(lambda token: self.stemmer.stem(token.lower()), self.tokenize_func(text_piece.text));
+
+class TextModeler:
+    def __init__(self, model_factory):
+        self.model_factory = model_factory;
+
+    def work(self, text_piece):
+        text_piece.lm = self.model_factory.build(text_piece.tokens);
+
 '''
 aggregate by average of k-nearest neighbors' distances
 '''
@@ -30,10 +53,6 @@ class Document:
         self.docno = docno;
         self.windows = windows;
         self.rel = rel;
-
-class TextScorer:
-    def score(self, text1, text2):
-        return 0;
 
 class DocumentModelFactory:
     def __init__(self, word_stats):
@@ -73,24 +92,28 @@ class CosTextScorer:
 
 
 class RetrievalWindowRanker:
-    def __init__(self, scorer):
+    def __init__(self, scorer, model_factory):
         self.scorer = scorer;
+        self.topic_chain = TextChain([TextStemmer(word_tokenize, stemmer), TextModeler(model_factory)]);
+        self.window_chain = self.topic_chain;
 
-    def rank(self, query, docs):
+    def rank(self, topic_str, docs):
+        topic = TextPiece(topic_str);
+        self.topic_chain.work(topic);        
         for doc in docs:
-            score_windows = [];
-            for window in windows:
-                score_windows.append((self.scorer.score(query.text, window.text), window));
-            if doc.rel:
-                score_windows.sort(reverse = True);
-            else:
-                score_windows.sort();
-            doc.sorted_windows = map(lambda score_window: score_window[1], score_windows);
+            doc.score_windows = [];
+            for window in doc.windows:
+                self.window_chain.work(window);
+                score = self.scorer.score(topic.lm, window.lm);
+                if not doc.rel:
+                    score = -score;
+                doc.score_windows.append(([score], window.text));
+            
 
 class DistanceWindowRanker:
     def __init__(self, scorer, docmodel_factory, aggregators):
         self.scorer = scorer;
-        self.docmodel_factory = docmodel_factory;
+        self.window_chain = TextChain([TextStemmer(word_tokenize, stemmer), TextModeler(model_factory)]); 
         self.aggregators = aggregators;
 
     def rank(self, query, docs):
@@ -100,10 +123,7 @@ class DistanceWindowRanker:
         print 'building model......';
         for doc in docs:
             for window in doc.windows:
-                window.tokens = word_tokenize(window.text);
-                window.tokens = map(lambda token: token.lower(), window.tokens);
-                window.tokens = map(lambda token: stemmer.stem(token), window.tokens);
-                window.docmodel = self.docmodel_factory.build(window.tokens);
+                self.window_chain.work(window);
 
         #* partition windows into positive and negative;
         print 'partitioning windows......';
@@ -124,7 +144,7 @@ class DistanceWindowRanker:
             id1 = id(window1);
             for window2 in negative_windows:
                 id2 = id(window2);
-                score = self.scorer.score(window1.docmodel, window2.docmodel);
+                score = self.scorer.score(window1.lm, window2.lm);
                 window1_scores = posneg_data.get(id1, Heap(size=10));
                 window1_scores.push(score);
                 posneg_data[id1] = window1_scores;
@@ -178,11 +198,12 @@ def exe_build_train(argv):
     topics = StandardFormat().read(topic_path);
     window_db = bsddb.hashopen(window_path);
     word_stat = load_word_stat(word_stat_path);
-    aggregators = map(lambda k: Aggregator(k), K_options);
-    ranker = DistanceWindowRanker(CosTextScorer(), DocumentModelFactory(word_stat),aggregators);
+    #aggregators = map(lambda k: Aggregator(k), K_options);
+    #ranker = DistanceWindowRanker(CosTextScorer(), DocumentModelFactory(word_stat),aggregators);
+    ranker = RetrievalWindowRanker(CosTextScorer(), DocumentModelFactory(word_stat));
     print 'loaded......';
 
-    p = Pool(20);
+    p = Pool(8);
     topic_ids = judge_file.keys();
     docs_groups = p.map(build_train, topic_ids);
     assert len(docs_groups) == len(topic_ids);
