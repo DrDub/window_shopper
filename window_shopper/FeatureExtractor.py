@@ -12,6 +12,7 @@ stemmer = EnglishStemmer();
 model_factory = 0;
 word_stat = 0;
 scorer = CosTextScorer();
+SIMILARITY_URL = "http://127.0.0.1:10137/sim/"
 
 class WindowWorker:
     def __init__(self, window_chain):
@@ -51,15 +52,48 @@ class RelevanceExtractor:
     def extract(self,topic, doc, window):
         return scorer.score(topic.lm, window.lm), scorer.score(topic.lm, doc.lm);
 
+class SimilarityExtractor:
+    """
+    Find which terms appear in the window similar to terms in the topic.
+    """
+    MAX = 16.
+    def __init__(self, url):
+        self.url = url
+
+    def extract(self, topic, doc, window):
+        window_token_set = set(window.tokens)
+        found = [keyword for keyword in topic.tokens if keyword in window_token_set]
+        if len(found) > 1:
+            return MAX
+        best_overall = -99999.
+        second_best = -99999.
+        for keyword in topic.tokens:
+            if keyword in found:
+                next
+            best = max(map(lambda other: self.compute_similarity(keyword,other), window.tokens))
+            if best >= best_overall:
+                second_best = best_overall
+                best_overall = best
+            elif best > second_best:
+                second_best = best
+        if len(found) == 1:
+            return best_overall
+        else:
+            return (best_overall + second_best) / 2.
+
+    def compute_similarity(self, term1, term2):
+        from urllib import urlopen
+        return float(urlopen("%s/%s/%s" % (self.url, term1, term2)).read())
+
 def extract_window_feature(topic, doc, window):
-    extractors = [IDFExtractor(word_stat), FidelityExtractor(scorer), RelevanceExtractor(scorer)];
+    extractors = [ IDFExtractor(word_stat), FidelityExtractor(scorer), RelevanceExtractor(scorer), SimilarityExtractor(SIMILARITY_URL) ];
     values = [];
     for extractor in extractors:
         values += extractor.extract(topic, doc, window);
     return values;
 
 def exe_extract_feature(argv):
-    window_path, doc_path, topic_path, judge_path, word_stat_path, out_path = argv; 
+    window_path, doc_path, topic_path, judge_path, word_stat_path, out_path = argv;
     judge_file = QRelFile(judge_path);
     topics = StandardFormat().read(topic_path);
     window_db = bsddb.hashopen(window_path);
