@@ -26,7 +26,11 @@ class QRelFile(util.KeyMapMap):
         lines = map(str.strip, f.readlines());
         for line in lines:
             tokens = line.split();
-            qid, nothing, docid, score = tokens[:4];
+            try:
+                qid, nothing, docid, score = tokens[:4];
+            except:
+                print line
+                raise
             qid = int(qid);
             if docid == '1':
                 print line;

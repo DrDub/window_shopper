@@ -10,6 +10,7 @@ import sys;
 from multiprocessing import Pool;
 from nltk.tokenize import word_tokenize, wordpunct_tokenize, sent_tokenize;
 from nltk.stem.snowball import EnglishStemmer
+from nltk.stem.wordnet import WordNetLemmatizer
 
 
 suffixes = ['html', 'text', 'title'];
@@ -72,10 +73,13 @@ class TextPiece:
     def tokenize(self):
         terms = word_tokenize(self.text);
         self.tokens = [];
+        self.lemmas = []
         stemmer = EnglishStemmer();
+        lemmatizer = WordNetLemmatizer()
         for term in terms:
             try:
-                self.tokens.append(stemmer.stem(term).lower());
+                self.tokens.append(stemmer.stem(term).lower())
+                self.lemmas.append(lemmatizer.lemmatize(term.lower()))
             except Exception, e:
                 print 'current text:', self.text;
                 print 'current term:', term;

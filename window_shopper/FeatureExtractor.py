@@ -12,7 +12,9 @@ stemmer = EnglishStemmer();
 model_factory = 0;
 word_stat = 0;
 scorer = CosTextScorer();
-SIMILARITY_URL = "http://127.0.0.1:10137/sim/"
+similarity_live = False
+SIMILARITY_DIR = "/path/to/wnsimil"
+SIMILARITY_URL = "http://127.0.0.1:10137/sim"
 
 class WindowWorker:
     def __init__(self, window_chain):
@@ -56,37 +58,76 @@ class SimilarityExtractor:
     """
     Find which terms appear in the window similar to terms in the topic.
     """
-    MAX = 16.
-    def __init__(self, url):
-        self.url = url
+    MAX = 1.
+    MIN = -99999.
+    def __init__(self, live,url=None,data_dir=None):
+        self.live = live
+        if live:
+            self.url = url
+        else:
+            self.data_dir = data_dir
+            self.simil_cache = dict()
+            self.simil_error = set()
 
     def extract(self, topic, doc, window):
-        window_token_set = set(window.tokens)
-        found = [keyword for keyword in topic.tokens if keyword in window_token_set]
+        window_token_set = set(window.lemmas)
+        if len(window.lemmas) == 0:
+            return SimilarityExtractor.MIN,
+        found = [keyword for keyword in topic.lemmas if keyword in window_token_set]
         if len(found) > 1:
-            return MAX
-        best_overall = -99999.
-        second_best = -99999.
-        for keyword in topic.tokens:
+            # multiple keywords in window, max score
+            return SimilarityExtractor.MAX,
+        best_overall = SimilarityExtractor.MIN
+        second_best = SimilarityExtractor.MIN
+        for keyword in topic.lemmas:
             if keyword in found:
-                next
-            best = max(map(lambda other: self.compute_similarity(keyword,other), window.tokens))
+                continue
+            best = max(map(lambda other: self.compute_similarity(keyword,other), window_token_set))
             if best >= best_overall:
                 second_best = best_overall
                 best_overall = best
             elif best > second_best:
                 second_best = best
-        if len(found) == 1:
-            return best_overall
+        if len(topic.lemmas) - len(found) == 1:
+            return best_overall,
         else:
-            return (best_overall + second_best) / 2.
+            if second_best == SimilarityExtractor.MIN:
+                return SimilarityExtractor.MIN,
+            else:
+                return (best_overall + second_best) / 2,
 
     def compute_similarity(self, term1, term2):
-        from urllib import urlopen
-        return float(urlopen("%s/%s/%s" % (self.url, term1, term2)).read())
+        if self.live:
+            from urllib import urlopen, quote_plus
+            try:
+                return float(urlopen("%s/%s/%s" % (self.url, quote_plus(term1), quote_plus(term2))).read())
+            except Exception as e:
+                print e
+                return SimilarityExtractor.MIN
+        else:
+            if term1 in self.simil_error:
+                return SimilarityExtractor.MIN                
+            if not term1 in self.simil_cache:
+                try:
+                    f = open("%s/%s.scores" % (self.data_dir, term1))
+                    scores = dict()
+                    for line in f:
+                        score, word = line.split()
+                        scores[word] = float(score)
+                    self.simil_cache[term1] = scores
+                except Exception as e:
+                    print e
+                    self.simil_error.add(term1)
+                    return SimilarityExtractor.MIN
+            scores = self.simil_cache[term1]
+            if not term2 in scores:
+                return SimilarityExtractor.MIN
+            else:
+                return scores[term2]
 
 def extract_window_feature(topic, doc, window):
-    extractors = [ IDFExtractor(word_stat), FidelityExtractor(scorer), RelevanceExtractor(scorer), SimilarityExtractor(SIMILARITY_URL) ];
+    extractors = [ IDFExtractor(word_stat), FidelityExtractor(scorer), RelevanceExtractor(scorer),
+        SimilarityExtractor(similarity_live, url=SIMILARITY_URL, data_dir=SIMILARITY_DIR) ];
     values = [];
     for extractor in extractors:
         values += extractor.extract(topic, doc, window);
@@ -107,7 +148,7 @@ def exe_extract_feature(argv):
     window_chain = topic_chain;
     doc_chain = TextChain([TextStemmer(word_tokenize, stemmer), TextModeler(model_factory), WindowWorker(window_chain)])
 
-    topic_ids = judge_file.keys()[:1];
+    topic_ids = judge_file.keys()
     for topic_id in topic_ids:
         if not topics.has_key(topic_id):
             continue;
