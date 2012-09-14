@@ -1,9 +1,8 @@
 from JudgeFile import QRelFile;
 from Index import Index;
 from TRECTopics import StandardFormat;
-import fastmap;
+from TextUtil import *;
 from WindowExtractor import *;
-from Heap import Heap;
 
 import numpy as np;
 import time;
@@ -11,31 +10,10 @@ import sys;
 import bsddb;
 from nltk.stem.snowball import EnglishStemmer
 from multiprocessing import Pool;
+import traceback;
 
 stemmer = EnglishStemmer();
-
-class TextChain:
-    def __init__(self, workers):
-        self.workers = workers;
-
-    def work(self, text_piece):
-        for worker in self.workers:
-            worker.work(text_piece);
-
-class TextStemmer:
-    def __init__(self, tokenize_func, stemmer):
-        self.tokenize_func = tokenize_func;
-        self.stemmer = stemmer;
-
-    def work(self, text_piece):
-        text_piece.tokens = map(lambda token: self.stemmer.stem(token.lower()), self.tokenize_func(text_piece.text));
-
-class TextModeler:
-    def __init__(self, model_factory):
-        self.model_factory = model_factory;
-
-    def work(self, text_piece):
-        text_piece.lm = self.model_factory.build(text_piece.tokens);
+stop_path = 'data/stoplist.dft';
 
 '''
 aggregate by average of k-nearest neighbors' distances
@@ -49,9 +27,10 @@ class Aggregator:
         return np.mean(values[:self.K]);
 
 class Document:
-    def __init__(self, docno, windows, rel):
+    def __init__(self, docno, doc, windows, rel):
         self.docno = docno;
         self.windows = windows;
+        self.doc = doc;
         self.rel = rel;
 
 class DocumentModelFactory:
@@ -75,8 +54,11 @@ class DocumentModelFactory:
             
 
 class CosTextScorer:
+    def __init__(self):
+        self.max_score = 1.0;
+
     def score(self, model1, model2):
-       return self.dot_product(model1, model2)/(self.norm(model1) * self.norm(model2))
+        return self.dot_product(model1, model2)/(self.norm(model1) * self.norm(model2))
 
     def dot_product(self, model1, model2):
         keys = set(model1.keys());
@@ -94,7 +76,7 @@ class CosTextScorer:
 class RetrievalWindowRanker:
     def __init__(self, scorer, model_factory):
         self.scorer = scorer;
-        self.topic_chain = TextChain([TextStemmer(word_tokenize, stemmer), TextModeler(model_factory)]);
+        self.topic_chain = TextChain([TextTokenizer(word_tokenize), TextTokenNormalizer(), TextStopRemover(stop_path), TextStemmer(stemmer), TextModeler(model_factory)]);
         self.window_chain = self.topic_chain;
 
     def rank(self, topic_str, docs):
@@ -102,121 +84,105 @@ class RetrievalWindowRanker:
         self.topic_chain.work(topic);        
         for doc in docs:
             doc.score_windows = [];
-            for window in doc.windows:
+            for i in xrange(len(doc.windows)):
+                window = doc.windows[i];
                 self.window_chain.work(window);
                 score = self.scorer.score(topic.lm, window.lm);
                 if not doc.rel:
                     score = -score;
-                doc.score_windows.append(([score], window.text));
+                doc.score_windows.append(([score], i));
             
-
 class DistanceWindowRanker:
     def __init__(self, scorer, docmodel_factory, aggregators):
         self.scorer = scorer;
-        self.window_chain = TextChain([TextStemmer(word_tokenize, stemmer), TextModeler(model_factory)]); 
+        self.window_chain = TextChain([TextTokenizer(word_tokenize), TextTokenNormalizer(), TextStopRemover(stop_path), TextStemmer(stemmer), TextModeler(docmodel_factory)]); 
+        self.doc_chain = self.window_chain;
         self.aggregators = aggregators;
 
     def rank(self, query, docs):
-        print query, len(docs);
+        print 'doc num:', len(docs);
         sys.stdout.flush();
         #* build doc model
-        print 'building model......';
         for doc in docs:
-            for window in doc.windows:
-                self.window_chain.work(window);
-
-        #* partition windows into positive and negative;
-        print 'partitioning windows......';
-        positive_windows = [];
-        negative_windows = [];
-        for doc in docs:
-            if doc.rel:
-                positive_windows += doc.windows;
-            else:
-                negative_windows += doc.windows;
-        print len(positive_windows), len(negative_windows);
+            self.doc_chain.work(doc.doc);
 
         #* calculate the similarity
-        print 'calculating similarity......';
-        posneg_data = {};
-        negpos_data = {};
-        for window1 in positive_windows:
-            id1 = id(window1);
-            for window2 in negative_windows:
-                id2 = id(window2);
-                score = self.scorer.score(window1.lm, window2.lm);
-                window1_scores = posneg_data.get(id1, Heap(size=10));
-                window1_scores.push(score);
-                posneg_data[id1] = window1_scores;
-                window2_scores = negpos_data.get(id2, Heap(size=10));
-                window2_scores.push(score);
-                negpos_data[id2] = window2_scores;
-        #print negpos_data.keys();
-        #print posneg_data.keys();
-
-        #* aggregate and rank the windows
-        for doc in docs:
-            score_windows = [];
-            if doc.rel:
-                score_data = posneg_data; 
-            else:
-                score_data = negpos_data;
-            for window in doc.windows:
-                raw_scores = score_data[id(window)].dat; 
-                scores = map(lambda aggregator: aggregator.aggregate(raw_scores), self.aggregators);
-                score_windows.append((scores, window.text));
-            doc.score_windows = score_windows;
+        for doc1 in docs:
+            doc1.score_windows = [];
+            for i in xrange(len(doc.windows)):
+                window = doc.windows[i];
+                self.window_chain.work(window);
+                score = self.scorer.score(doc1.doc.lm, window.lm);
+                other_scores = [];
+                for doc2 in docs:
+                    if (doc2.rel > 0 and doc1.rel <= 0) or (doc2.rel <= 0 and doc1.rel) > 0 :
+                        other_scores.append(self.scorer.score(doc2.doc.lm, window.lm));
+                values = map(lambda aggregator: score - aggregator.aggregate(other_scores), self.aggregators);
+                doc1.score_windows.append((values, i));
 
 judge_file = 0;
 topics = 0;
 word_stat = 0;
 window_db = 0;
+doc_db = 0;
 ranker = 0;
 K_options = [1,3,5,10];
 
 def build_train(topic_id):
-    print topic_id;
-    docs = [];
-    if not topics.has_key(topic_id):
-        return docs;
-    topic_str = topics[topic_id];
-    for docno, rel in judge_file[topic_id].items():
-        if not is_cluewebB(docno):
-            continue;
-        try:
-            windows = map(lambda sentence: TextPiece(sentence), window_db[docno].split('\n'));
-            docs.append(Document(docno, windows, int(rel)));
-        except Exception,e:
-            sys.stderr.write('%s: error at %s\n' % (str(e),docno));
-    ranker.rank(topic_str, docs);
+    try:
+        print 'topic:', topic_id;
+        docs = [];
+        if not topics.has_key(topic_id):
+            return docs;
+        topic_str = topics[topic_id];
+        for docno, rel in judge_file[topic_id].items():
+            if not is_cluewebB(docno):
+                continue;
+            try:
+                windows = map(lambda sentence: TextPiece(sentence), window_db[docno].split('\n'));
+                docs.append(Document(docno, TextPiece(doc_db[docno]), windows, int(rel)));
+            except Exception,e:
+                sys.stderr.write(str(traceback.format_exc()));
+                sys.stderr.write('%s %s: error at %s\n' % (str(e.__class__), str(e),docno));
+                sys.stderr.write('-' * 100 + '\n');
+                sys.exit(-1);
+        ranker.rank(topic_str, docs);
+    except Exception as e:
+        print traceback.format_exc();
+        sys.exit(-1);
     return docs;
                 
 def exe_build_train(argv):
-    judge_path, topic_path, word_stat_path, window_path, out_path = argv;
-    global judge_file, topics, window_db, word_stat, ranker;
+#1. create the workers;
+    judge_path, topic_path, word_stat_path, doc_path, window_path, out_path = argv;
+    global judge_file, topics, doc_db, window_db, word_stat, ranker;
     judge_file = QRelFile(judge_path);
     topics = StandardFormat().read(topic_path);
+    doc_db = bsddb.hashopen(doc_path);
     window_db = bsddb.hashopen(window_path);
     word_stat = load_word_stat(word_stat_path);
-    #aggregators = map(lambda k: Aggregator(k), K_options);
-    #ranker = DistanceWindowRanker(CosTextScorer(), DocumentModelFactory(word_stat),aggregators);
+#    aggregators = map(lambda k: Aggregator(k), K_options);
+#    ranker = DistanceWindowRanker(CosTextScorer(), DocumentModelFactory(word_stat),aggregators);
     ranker = RetrievalWindowRanker(CosTextScorer(), DocumentModelFactory(word_stat));
-    print 'loaded......';
 
-    p = Pool(8);
+#2. build the training data;
+#    p = Pool(4);
     topic_ids = judge_file.keys();
-    docs_groups = p.map(build_train, topic_ids);
+#    docs_groups = p.map(build_train, topic_ids);
+    docs_groups = map(build_train, topic_ids);
     assert len(docs_groups) == len(topic_ids);
 
+#3. write out the training data
     writer = open(out_path, 'w');
     for i in xrange(len(topic_ids)):
         topic_id = topic_ids[i];
         docs = docs_groups[i];
-        writer.write('topic_id:%s\n' % (topic_id));
         for doc in docs:
-            writer.write('docno:%s\n' % doc.docno);
-            for scores, window_text in doc.score_windows:
-                writer.write('%s:%s\n' % (','.join(map(str, scores)), window_text.encode('utf8')));
+            docno = doc.docno;
+            judge = judge_file[topic_id][docno];
+            for scores, sentence_id in doc.score_windows:
+                score_str = ','.join(map(str, scores));
+                writer.write('%s %s %s %d %s\n' % (topic_id, docno, judge, sentence_id, score_str));    
     writer.close();
         
 def test_stat(argv):
@@ -266,6 +232,33 @@ def exe_gen_field(argv):
     writer.close();
     f.close();
 
+def exe_view_train(argv):
+    train_path, window_path, doc_path = argv;
+    from Learner import TrainFile;
+    train_file = TrainFile();
+    train_file.load(train_path);
+    window_db = bsddb.hashopen(window_path);
+    doc_db = bsddb.hashopen(doc_path);
+
+    num = 1000;
+    key = train_file.keys()[num];
+    qid, docno, rel, sid = key.split();
+    doc_text = doc_db[docno];
+    print qid, docno;
+    print doc_text;
+    print '=' * 50;
+    windows = window_db[docno].split('\n'); 
+    window_scores = [];
+    for key in train_file.keys()[num:]:
+        qid, curr_docno, rel, sid = key.split();
+        if curr_docno <> docno:
+            break;
+        window_text = windows[int(sid)]; 
+        value = train_file[key];
+        window_scores.append((value, window_text));
+    window_scores.sort();
+    for score, window_text in window_scores:
+        print score, window_text;
 
 if __name__ == '__main__':
     option = sys.argv[1];
@@ -275,3 +268,6 @@ if __name__ == '__main__':
         test_stat(sys.argv[2:]);
     elif option == '--gen-field':
         exe_gen_field(sys.argv[2:]);
+    elif option == '--view-train':
+        exe_view_train(sys.argv[2:]);
+        

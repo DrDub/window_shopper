@@ -58,6 +58,10 @@ class Index:
         f = os.popen(cmd);
         lines = f.readlines();
         f.close();
+        for i in xrange(len(lines)):
+            if lines[i] == '\n':
+                lines = lines[i+1:];
+                break;
         content = ''.join(lines);
         return content;
 

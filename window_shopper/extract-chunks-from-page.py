@@ -40,11 +40,11 @@ def extract_para(node, f):
 try:
     soup = BeautifulSoup(open(sys.argv[1]),'html5lib')
     output_title = codecs.open(sys.argv[3], encoding='utf-8', mode='w')
-    head = soup.find('head')
+    head = soup.find('head');
     if head:
-        title_tag= head.find('title')
-        if title_tag:
-            output_title.write(title_tag.string.replace('\n', ' '))
+        title = head.find('title');
+        if title:
+            output_title.write(title.string.replace('\n', ' '))
     output_title.close()
 
     
